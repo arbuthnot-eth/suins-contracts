@@ -1,0 +1,57 @@
+---
+title: "Derived Children (Design Notes)"
+---
+
+## Goal
+
+Deterministic IDs for subname objects using a stable parent object and a key derived from the subname.
+
+Example intent:
+
+- Parent: `parent.sui`
+- Subname: `child.parent.sui` → key: `child`
+- Subname: `grand.child.parent.sui` → key: `grand.child`
+- ID derivation uses the **same parent** (`parent.sui`) with a key that is the subname portion.
+
+## Important Constraints (Sui Move)
+
+### Key must be `copy + drop + store`
+
+Both `sui::derived_object` and the underlying `sui::dynamic_field::hash_type_and_key` require keys to be `copy + drop + store`.
+
+That means you cannot use `String`, `vector<u8>`, or `Domain` directly as the key in Move.
+
+### Reclaiming behavior differs
+
+- `sui::derived_object` **cannot reclaim**: once a `(parent, key)` is claimed, it stays reserved forever (even if the object is deleted).
+- Dynamic fields (child objects) **can be reclaimed** by removing the child object from the parent.
+
+If we need “expire → prune/burn → re-register same name” to mint a *new* object at the same deterministic ID, `derived_object` is a poor fit unless the object is never deleted and can be safely reassigned.
+
+## Practical Key Encoding
+
+If we want a human-readable key like `"grand.child"`, we need to map it into a `copy` type.
+
+Recommended: compute `subname_key: address` off-chain from the normalized subname part (e.g. `"grand.child"`) using a collision-resistant hash (e.g. `blake2b256`) and pass that `address` into Move.
+
+To avoid silent collisions, store the original `subname` string inside the created object and assert it matches on load/mutation.
+
+## Collision Checks
+
+For derived objects:
+
+- `assert!(!derived_object::exists(&parent_uid, key), ...)`
+- `let uid = derived_object::claim(&mut parent_uid, key);`
+
+For dynamic-field child objects:
+
+- derive the child id via `dynamic_field::hash_type_and_key(parent.to_address(), key)`
+- `assert!(!dynamic_field::has_child_object(parent.to_address(), child_id), ...)`
+- create via `dynamic_field::add_child_object(parent.to_address(), child_obj)`
+
+## Open Design Questions
+
+1. Should we use `derived_object` (better parallelism/TTO) or dynamic-field child objects (supports reclaiming)?
+2. If reclaiming is required, do we redesign subname objects so they are not deleted on expiry, but updated/reassigned?
+3. What is the canonical normalization for the “subname key string” (`lowercase`, punycode, label separator, etc.) before hashing off-chain?
+
