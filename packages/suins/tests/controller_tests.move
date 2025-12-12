@@ -688,6 +688,226 @@ fun test_burn_subname_expired() {
 }
 
 #[test]
+fun test_prune_expired_subname_by_parent_allows_reregistration() {
+    let mut scenario_val = test_init();
+    let scenario = &mut scenario_val;
+    scenario.next_tx(SUINS_ADDRESS);
+
+    let mut clock = scenario.take_shared<Clock>();
+    let mut suins = scenario.take_shared<SuiNS>();
+
+    let (parent_nft, subdomain_nft) = {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+
+        let parent_domain = domain::new(b"test.sui".to_string());
+        let parent_nft = registry.add_record_ignoring_grace_period(
+            parent_domain,
+            1,
+            &clock,
+            scenario.ctx(),
+        );
+
+        let subdomain = domain::new(b"child.test.sui".to_string());
+        let mut subdomain_nft = registry.add_record_ignoring_grace_period(
+            subdomain,
+            1,
+            &clock,
+            scenario.ctx(),
+        );
+        registry.set_expiration_timestamp_ms(
+            &mut subdomain_nft,
+            subdomain,
+            clock::timestamp_ms(&clock) + 1,
+        );
+
+        (parent_nft, subdomain_nft)
+    };
+
+    clock.increment_for_testing(2);
+    controller::prune_expired_subname_by_parent(
+        &mut suins,
+        &parent_nft,
+        b"child.test.sui".to_string(),
+        &clock,
+    );
+
+    let subdomain_nft_2 = {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+        registry.add_record_ignoring_grace_period(
+            domain::new(b"child.test.sui".to_string()),
+            1,
+            &clock,
+            scenario.ctx(),
+        )
+    };
+
+    transfer::public_transfer(parent_nft, SUINS_ADDRESS);
+    transfer::public_transfer(subdomain_nft, SUINS_ADDRESS);
+    transfer::public_transfer(subdomain_nft_2, SUINS_ADDRESS);
+
+    test_scenario::return_shared(clock);
+    test_scenario::return_shared(suins);
+    scenario_val.end();
+}
+
+#[test, expected_failure(abort_code = registry::ERecordNotExpired)]
+fun test_prune_expired_subname_by_parent_aborts_if_not_expired() {
+    let mut scenario_val = test_init();
+    let scenario = &mut scenario_val;
+    scenario.next_tx(SUINS_ADDRESS);
+
+    let mut clock = scenario.take_shared<Clock>();
+    let mut suins = scenario.take_shared<SuiNS>();
+
+    let parent_nft = {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+
+        registry.add_record_ignoring_grace_period(
+            domain::new(b"test.sui".to_string()),
+            1,
+            &clock,
+            scenario.ctx(),
+        )
+    };
+
+    let subdomain_nft = {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+
+        registry.add_record_ignoring_grace_period(
+            domain::new(b"child.test.sui".to_string()),
+            1,
+            &clock,
+            scenario.ctx(),
+        )
+    };
+
+    controller::prune_expired_subname_by_parent(
+        &mut suins,
+        &parent_nft,
+        b"child.test.sui".to_string(),
+        &clock,
+    );
+
+    transfer::public_transfer(parent_nft, SUINS_ADDRESS);
+    transfer::public_transfer(subdomain_nft, SUINS_ADDRESS);
+    test_scenario::return_shared(clock);
+    test_scenario::return_shared(suins);
+    scenario_val.end();
+}
+
+#[test, expected_failure(abort_code = controller::EParentMismatch)]
+fun test_prune_expired_subname_by_parent_aborts_if_wrong_parent() {
+    let mut scenario_val = test_init();
+    let scenario = &mut scenario_val;
+    scenario.next_tx(SUINS_ADDRESS);
+
+    let mut clock = scenario.take_shared<Clock>();
+    let mut suins = scenario.take_shared<SuiNS>();
+
+    let parent_nft = {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+
+        registry.add_record_ignoring_grace_period(
+            domain::new(b"test.sui".to_string()),
+            1,
+            &clock,
+            scenario.ctx(),
+        )
+    };
+
+    let mut other_subdomain_nft = {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+
+        registry.add_record_ignoring_grace_period(
+            domain::new(b"child.other.sui".to_string()),
+            1,
+            &clock,
+            scenario.ctx(),
+        )
+    };
+
+    {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+        registry.set_expiration_timestamp_ms(
+            &mut other_subdomain_nft,
+            domain::new(b"child.other.sui".to_string()),
+            clock::timestamp_ms(&clock) + 1,
+        );
+    };
+    clock.increment_for_testing(2);
+
+    controller::prune_expired_subname_by_parent(
+        &mut suins,
+        &parent_nft,
+        b"child.other.sui".to_string(),
+        &clock,
+    );
+
+    transfer::public_transfer(parent_nft, SUINS_ADDRESS);
+    transfer::public_transfer(other_subdomain_nft, SUINS_ADDRESS);
+    test_scenario::return_shared(clock);
+    test_scenario::return_shared(suins);
+    scenario_val.end();
+}
+
+#[test, expected_failure(abort_code = registry::ERecordNotFound)]
+fun test_prune_expired_subname_by_parent_aborts_if_record_missing() {
+    let mut scenario_val = test_init();
+    let scenario = &mut scenario_val;
+    scenario.next_tx(SUINS_ADDRESS);
+
+    let clock = scenario.take_shared<Clock>();
+    let mut suins = scenario.take_shared<SuiNS>();
+
+    let parent_nft = {
+        let registry = suins::app_registry_mut<ControllerV2, Registry>(
+            controller::auth_for_testing(),
+            &mut suins,
+        );
+
+        registry.add_record_ignoring_grace_period(
+            domain::new(b"test.sui".to_string()),
+            1,
+            &clock,
+            scenario.ctx(),
+        )
+    };
+
+    controller::prune_expired_subname_by_parent(
+        &mut suins,
+        &parent_nft,
+        b"missing.test.sui".to_string(),
+        &clock,
+    );
+
+    transfer::public_transfer(parent_nft, SUINS_ADDRESS);
+    test_scenario::return_shared(clock);
+    test_scenario::return_shared(suins);
+    scenario_val.end();
+}
+
+#[test]
 fun test_object_reverse_lookup() {
     let mut scenario_val = test_init();
     let scenario = &mut scenario_val;
